@@ -102,21 +102,30 @@ class PoseEncoder(nn.Module):
         self.mu_head     = nn.Linear(hidden_dim, latent_dim)
         self.logvar_head = nn.Linear(hidden_dim, latent_dim)
 
-    def forward(self, initial_pose_flat, action_onehot):
+    def forward(self, motion_seq, action_onehot):
         """
         Args:
-            initial_pose_flat : [B, P]
-            action_onehot     : [B, A]
+            motion_seq    : [B, T, J, 2]  (full sequence)
+            action_onehot : [B, A]
         Returns:
             mu     : [B, latent_dim]
             logvar : [B, latent_dim]
         """
-        x = torch.cat([initial_pose_flat, action_onehot], dim=-1)  # [B, P+A]
-        x = self.input_proj(x).unsqueeze(1)                         # [B, 1, hidden]
-        _, h = self.gru(x)                                           # h: [1, B, hidden]
-        h = h.squeeze(0)                                             # [B, hidden]
-        mu     = self.mu_head(h)
-        logvar = self.logvar_head(h)
+        B, T, J, _ = motion_seq.shape
+        x = motion_seq.view(B, T, -1)  # [B, T, P]
+        
+        # Expand action to every frame
+        action_expanded = action_onehot.unsqueeze(1).expand(B, T, -1)
+        x = torch.cat([x, action_expanded], dim=-1)  # [B, T, P+A]
+        
+        x = self.input_proj(x)                       # [B, T, hidden]
+        _, h = self.gru(x)                           # h: [num_layers, B, hidden]
+        
+        # Take the final hidden state of the last GRU layer
+        h_final = h[-1]                              # [B, hidden]
+        
+        mu     = self.mu_head(h_final)
+        logvar = self.logvar_head(h_final)
         return mu, logvar
 
     @staticmethod
@@ -305,8 +314,8 @@ class MotionCVAE(nn.Module):
         initial_pose_flat = motion_seq[:, 0, :, :].reshape(B, P)  # [B, P]
         action_onehot     = self._label_to_onehot(label)           # [B, A]
 
-        # Encode -> latent distribution
-        mu, logvar = self.encoder(initial_pose_flat, action_onehot)
+        # Encode full sequence -> latent distribution
+        mu, logvar = self.encoder(motion_seq, action_onehot)
 
         # Sample z (reparameterisation trick)
         z = PoseEncoder.reparameterise(mu, logvar)                  # [B, latent_dim]

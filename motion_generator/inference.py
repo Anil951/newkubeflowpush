@@ -145,9 +145,11 @@ def draw_skeleton_frame(canvas, keypoints_xy, frame_w, frame_h,
     """
     # Convert normalised [0,1] coords to pixel coords
     px_pts = []
+    # With Torso scaling, (0,0) is the hip, and torso=1.0. Human is ~4 units tall.
+    scale = (frame_h - 80) / 4.0
     for (x, y) in keypoints_xy:
-        px = int(x * (frame_w - 80) + 40)
-        py = int(y * (frame_h - 80) + 40)
+        px = int(x * scale + frame_w / 2.0)
+        py = int(y * scale + frame_h / 2.0)
         px_pts.append((px, py))
 
     # Draw bones

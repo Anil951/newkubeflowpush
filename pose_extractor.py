@@ -33,7 +33,7 @@ settings.update({
 det_model = YOLO('yolo11x.pt')
 pose_model = YOLO('yolo11x-pose.pt')
 device = 'cpu'
-image_path = './iofiles/sketch.png'
+image_path = './iofiles/image.jpeg'
 save_img_path = f'./iofiles/cropped_{image_path.split("/")[2]}'
 save_kpts_path = './iofiles/normalized_keypoints.json'
 
@@ -119,13 +119,35 @@ def consolidate_and_shift_keypoints(kpts, confs, bbox):
     return new_kpts
 
 def normalize_keypoints(kpts, crop_w, crop_h):
-    """Normalizes keypoints to a 0.0 - 1.0 scale."""
+    """Normalizes keypoints using Torso length, centering at the hip."""
+    pts = np.array(kpts, dtype=np.float32)
+    
+    # Calculate hip midpoint (indices 7 and 8)
+    hip_mid = (pts[7] + pts[8]) / 2.0
+    
+    # Calculate shoulder midpoint (indices 1 and 2)
+    shoulder_mid = (pts[1] + pts[2]) / 2.0
+    
+    # Shift so hip is at (0, 0)
+    pts = pts - hip_mid
+    
+    # Torso length (shoulder to hip)
+    # Since hip is now (0,0), the vector from hip to shoulder is just the new shoulder_mid
+    shoulder_mid_shifted = shoulder_mid - hip_mid
+    torso_length = np.linalg.norm(shoulder_mid_shifted)
+    
+    if torso_length < 1e-6:
+        torso_length = 1.0
+        
+    pts = pts / torso_length
+    
     normalized = []
-    for x, y in kpts:
-        if x == 0.0 and y == 0.0:
+    for pt in pts:
+        if np.isnan(pt).any() or np.isinf(pt).any():
             normalized.append([0.0, 0.0])
         else:
-            normalized.append([round(x / crop_w, 4), round(y / crop_h, 4)])
+            normalized.append([round(float(pt[0]), 4), round(float(pt[1]), 4)])
+            
     return normalized
 
 def adjust_keypoints_gui(image, keypoints):

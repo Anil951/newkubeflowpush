@@ -3,6 +3,5 @@ iofiles/yolo11x.pt
 motion_generator/dataset
 motion_generator/models
 motion_generator/checkpoints
-iofiles/normalized_keypoints.json
 iofiles/motion_cvae_best.pt
 .env

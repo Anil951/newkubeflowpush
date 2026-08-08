@@ -105,21 +105,26 @@ def project_to_front_view(joints_13):
 
 def normalise_clip(pose_2d):
     """
-    Root-centre around the initial hip midpoint, then normalise to [0, 1].
+    Root-centre around the initial hip midpoint, then normalise scale using Torso length.
+    This ensures that jumping sequences aren't shrunk compared to walking sequences.
 
     Args:
         pose_2d: [T, 13, 2]
     Returns:
-        [T, 13, 2]  all values in [0, 1]
+        [T, 13, 2]  centered at (0,0) and scaled so torso length = 1.0
     """
     hip_mid = (pose_2d[0, 7, :] + pose_2d[0, 8, :]) / 2.0
     pose_2d = pose_2d - hip_mid[np.newaxis, np.newaxis, :]
 
-    flat = pose_2d.reshape(-1, 2)
-    min_xy = flat.min(axis=0)
-    max_xy = flat.max(axis=0)
-    extent = np.where((max_xy - min_xy) < 1e-6, 1.0, max_xy - min_xy)
-    pose_2d = (pose_2d - min_xy) / extent
+    # Torso length in the first frame
+    shoulder_mid = (pose_2d[0, 1, :] + pose_2d[0, 2, :]) / 2.0
+    # Since we already subtracted hip_mid, hip_mid is now (0,0)
+    torso_length = np.linalg.norm(shoulder_mid)
+    
+    if torso_length < 1e-6:
+        torso_length = 1.0
+        
+    pose_2d = pose_2d / torso_length
     return pose_2d.astype(np.float32)
 
 
