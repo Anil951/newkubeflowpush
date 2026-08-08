@@ -1,0 +1,398 @@
+"""
+dnn.py
+======
+Action-Conditioned Motion Generator — CVAE-GRU Architecture.
+
+Design lineage:
+  - GenMotion / action2motion  :  GRU-based generator with action one-hot injection
+                                  (MotionGenerator, GaussianGRU, DecoderGRU)
+  - GenMotion / action_conditioned :  CVAE framing; encoder + decoder conditioning
+  - monkey-net / PredictionModule  :  Step-wise GRU rollout seeded by an initial pose
+
+Architecture Overview
+---------------------
+                 ┌──────────────────────────────┐
+  initial_pose   │         PoseEncoder           │ (training only)
+  + action_onehot│   Linear -> GRU -> mu/logvar  │ -> z ~ N(mu, sigma)
+                 └──────────────────────────────┘
+                            │  z
+                            ▼
+                 ┌──────────────────────────────┐
+                 │       MotionDecoder           │
+  z + action +   │   per-step GRUCell rollout   │ -> [T, 13, 2] sequence
+  initial_pose   │   (T=64 auto-regressive)     │
+                 └──────────────────────────────┘
+
+At inference: z ~ N(0, 1)  (no encoder needed)
+
+Shapes
+------
+  B  = batch size
+  T  = 64  (fixed sequence length)
+  J  = 13  (number of keypoints)
+  A  = 4   (number of action classes)
+  P  = J*2 = 26  (flattened initial pose)
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from motion_generator.datapreprocess import NUM_ACTIONS, SEQ_LEN, NUM_JOINTS
+
+# Convenience constants
+A = NUM_ACTIONS   # 4
+T = SEQ_LEN       # 64
+J = NUM_JOINTS    # 13
+P = J * 2         # 26  (flattened 2D pose)
+
+
+# ---------------------------------------------------------------------------
+# Helper: build a simple MLP
+# ---------------------------------------------------------------------------
+
+def _mlp(in_dim, hidden_dims, out_dim, activation=nn.LeakyReLU(0.2)):
+    layers = []
+    prev = in_dim
+    for h in hidden_dims:
+        layers += [nn.Linear(prev, h), activation]
+        prev = h
+    layers.append(nn.Linear(prev, out_dim))
+    return nn.Sequential(*layers)
+
+
+# ---------------------------------------------------------------------------
+# 1.  PoseEncoder  (CVAE encoder – used only during training)
+# ---------------------------------------------------------------------------
+
+class PoseEncoder(nn.Module):
+    """
+    Encodes the initial pose + action label into a latent distribution (mu, logvar).
+
+    Inspired by:
+      - GenMotion's GaussianGRU (motion_vae.py)
+      - action_conditioned CVAE encoder
+
+    Input  : initial_pose [B, P]  (flattened, normalised to [0,1])
+             action_onehot [B, A]
+    Output : mu [B, latent_dim], logvar [B, latent_dim]
+    """
+
+    def __init__(self, latent_dim=128, hidden_dim=256, n_layers=1):
+        super().__init__()
+        self.latent_dim = latent_dim
+
+        # Project pose+action -> hidden space
+        self.input_proj = nn.Sequential(
+            nn.Linear(P + A, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.LeakyReLU(0.2),
+        )
+
+        # GRU to capture temporal structure of the input
+        # (here we treat the single initial pose as a sequence of length 1)
+        self.gru = nn.GRU(
+            input_size  = hidden_dim,
+            hidden_size = hidden_dim,
+            num_layers  = n_layers,
+            batch_first = True,
+        )
+
+        # Gaussian heads
+        self.mu_head     = nn.Linear(hidden_dim, latent_dim)
+        self.logvar_head = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, initial_pose_flat, action_onehot):
+        """
+        Args:
+            initial_pose_flat : [B, P]
+            action_onehot     : [B, A]
+        Returns:
+            mu     : [B, latent_dim]
+            logvar : [B, latent_dim]
+        """
+        x = torch.cat([initial_pose_flat, action_onehot], dim=-1)  # [B, P+A]
+        x = self.input_proj(x).unsqueeze(1)                         # [B, 1, hidden]
+        _, h = self.gru(x)                                           # h: [1, B, hidden]
+        h = h.squeeze(0)                                             # [B, hidden]
+        mu     = self.mu_head(h)
+        logvar = self.logvar_head(h)
+        return mu, logvar
+
+    @staticmethod
+    def reparameterise(mu, logvar):
+        """Reparameterisation trick: z = mu + eps * sigma."""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+
+# ---------------------------------------------------------------------------
+# 2.  MotionDecoder  (CVAE decoder / generator)
+# ---------------------------------------------------------------------------
+
+class MotionDecoder(nn.Module):
+    """
+    Auto-regressive GRU decoder that generates a T-frame keypoint sequence.
+
+    Inspired by:
+      - monkey-net PredictionModule (step-wise GRU rollout seeded by initial pose)
+      - GenMotion DecoderGRU / MotionGenerator (hidden-state rollout with action label)
+
+    At each step t:
+        input_t  = [prev_pose | z | action_onehot]
+        h_t      = GRUCell(input_t, h_{t-1})
+        pose_t   = Linear(h_t)  -> tanh -> [J, 2]
+
+    The very first prev_pose is the initial pose from pose_extractor.py.
+
+    Input:
+        z             [B, latent_dim]
+        initial_pose  [B, P]
+        action_onehot [B, A]
+    Output:
+        seq           [B, T, J, 2]
+    """
+
+    def __init__(self, latent_dim=128, hidden_dim=256, n_layers=2, seq_len=T):
+        super().__init__()
+        self.seq_len    = seq_len
+        self.n_layers   = n_layers
+        self.hidden_dim = hidden_dim
+
+        # Dimensionality of one decoder step's input
+        self.step_input_dim = P + latent_dim + A  # prev_pose + z + action
+
+        # Project step input to hidden space
+        self.input_embed = nn.Sequential(
+            nn.Linear(self.step_input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.LeakyReLU(0.2),
+        )
+
+        # Stack of GRUCells (from GenMotion DecoderGRU / motion_vae.py pattern)
+        self.gru_cells = nn.ModuleList([
+            nn.GRUCell(hidden_dim, hidden_dim) for _ in range(n_layers)
+        ])
+
+        # Output head: hidden -> flattened pose [P]
+        self.output_head = nn.Linear(hidden_dim, P)
+
+    def _init_hidden(self, batch_size, device):
+        """Initialise GRU hidden states with zeros."""
+        return [
+            torch.zeros(batch_size, self.hidden_dim, device=device)
+            for _ in range(self.n_layers)
+        ]
+
+    def forward(self, z, initial_pose_flat, action_onehot):
+        """
+        Args:
+            z             : [B, latent_dim]
+            initial_pose_flat : [B, P]
+            action_onehot     : [B, A]
+        Returns:
+            seq : [B, T, J, 2]
+        """
+        B      = z.shape[0]
+        device = z.device
+        hidden = self._init_hidden(B, device)
+
+        prev_pose = initial_pose_flat   # [B, P]
+        outputs   = []
+
+        for _ in range(self.seq_len):
+            # Build step input
+            step_in = torch.cat([prev_pose, z, action_onehot], dim=-1)  # [B, step_input_dim]
+            h_in    = self.input_embed(step_in)                           # [B, hidden]
+
+            # Multi-layer GRUCell forward pass
+            h_new = hidden[0] = self.gru_cells[0](h_in, hidden[0])
+            for i in range(1, self.n_layers):
+                h_new = hidden[i] = self.gru_cells[i](h_new, hidden[i])
+
+            # Output pose
+            pose_flat = self.output_head(h_new)      # [B, P]
+            pose_flat = torch.sigmoid(pose_flat)     # constrain to [0, 1]
+
+            outputs.append(pose_flat.unsqueeze(1))   # [B, 1, P]
+            prev_pose = pose_flat                    # auto-regressive
+
+        seq_flat = torch.cat(outputs, dim=1)                  # [B, T, P]
+        seq      = seq_flat.view(B, self.seq_len, J, 2)       # [B, T, J, 2]
+        return seq
+
+
+# ---------------------------------------------------------------------------
+# 3.  MotionCVAE  (full model wrapper)
+# ---------------------------------------------------------------------------
+
+class MotionCVAE(nn.Module):
+    """
+    Full Conditional Variational Auto-Encoder for action-conditioned motion synthesis.
+
+    Usage:
+        model = MotionCVAE()
+
+        # Training:
+        seq_recon, mu, logvar = model(motion_seq, label)
+
+        # Inference (generation):
+        gen_seq = model.generate(initial_pose, label)  # -> [1, T, J, 2]
+    """
+
+    def __init__(
+        self,
+        latent_dim  = 128,
+        hidden_dim  = 256,
+        enc_layers  = 1,
+        dec_layers  = 2,
+        num_actions = A,
+        seq_len     = T,
+    ):
+        super().__init__()
+        self.latent_dim  = latent_dim
+        self.num_actions = num_actions
+        self.seq_len     = seq_len
+
+        self.encoder = PoseEncoder(
+            latent_dim = latent_dim,
+            hidden_dim = hidden_dim,
+            n_layers   = enc_layers,
+        )
+        self.decoder = MotionDecoder(
+            latent_dim = latent_dim,
+            hidden_dim = hidden_dim,
+            n_layers   = dec_layers,
+            seq_len    = seq_len,
+        )
+
+    # ------------------------------------------------------------------
+    def _label_to_onehot(self, label):
+        """Convert integer label tensor [B] to one-hot [B, A]."""
+        B = label.shape[0]
+        onehot = torch.zeros(B, self.num_actions, device=label.device)
+        onehot.scatter_(1, label.unsqueeze(1), 1.0)
+        return onehot
+
+    # ------------------------------------------------------------------
+    def forward(self, motion_seq, label):
+        """
+        Training forward pass.
+
+        Args:
+            motion_seq : [B, T, J, 2]  – ground-truth sequence
+            label      : [B]            – integer class index
+
+        Returns:
+            seq_recon  : [B, T, J, 2]  – reconstructed sequence
+            mu         : [B, latent_dim]
+            logvar     : [B, latent_dim]
+        """
+        B = motion_seq.shape[0]
+        device = motion_seq.device
+
+        # Use the first frame as the initial pose
+        initial_pose_flat = motion_seq[:, 0, :, :].reshape(B, P)  # [B, P]
+        action_onehot     = self._label_to_onehot(label)           # [B, A]
+
+        # Encode -> latent distribution
+        mu, logvar = self.encoder(initial_pose_flat, action_onehot)
+
+        # Sample z (reparameterisation trick)
+        z = PoseEncoder.reparameterise(mu, logvar)                  # [B, latent_dim]
+
+        # Decode
+        seq_recon = self.decoder(z, initial_pose_flat, action_onehot)  # [B, T, J, 2]
+
+        return seq_recon, mu, logvar
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def generate(self, initial_pose_flat, label_idx, num_samples=1, temperature=1.0):
+        """
+        Generate motion sequences at inference time.
+
+        Args:
+            initial_pose_flat : Tensor [P] or [1, P] or [B, P]  (normalised [0,1])
+            label_idx         : int  – action class index (0=walk, 1=run, 2=jump, 3=throw)
+            num_samples       : number of sequences to generate
+            temperature       : scale on latent noise (>1 more diverse, <1 more conservative)
+
+        Returns:
+            seq : Tensor [num_samples, T, J, 2]
+        """
+        device = next(self.parameters()).device
+        self.eval()
+
+        # Handle varying input shapes
+        if initial_pose_flat.dim() == 1:
+            initial_pose_flat = initial_pose_flat.unsqueeze(0)  # [1, P]
+        if initial_pose_flat.shape[0] == 1 and num_samples > 1:
+            initial_pose_flat = initial_pose_flat.expand(num_samples, -1)
+
+        initial_pose_flat = initial_pose_flat.to(device)
+
+        label_t   = torch.tensor([label_idx] * num_samples, dtype=torch.long, device=device)
+        action_oh = self._label_to_onehot(label_t)
+
+        # Sample z from standard normal prior (scaled by temperature)
+        z = torch.randn(num_samples, self.latent_dim, device=device) * temperature
+
+        seq = self.decoder(z, initial_pose_flat, action_oh)  # [num_samples, T, J, 2]
+        return seq
+
+
+# ---------------------------------------------------------------------------
+# Loss functions
+# ---------------------------------------------------------------------------
+
+def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0):
+    """
+    CVAE loss = reconstruction (MSE) + KL divergence.
+
+    Args:
+        seq_recon  : [B, T, J, 2]  model output
+        seq_gt     : [B, T, J, 2]  ground truth
+        mu         : [B, latent_dim]
+        logvar     : [B, latent_dim]
+        kl_weight  : scalar weight on KL term (warm-up during training)
+
+    Returns:
+        total_loss, recon_loss, kl_loss  (all scalar tensors)
+    """
+    # Reconstruction loss (mean over all elements)
+    recon_loss = F.mse_loss(seq_recon, seq_gt, reduction="mean")
+
+    # KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+    total_loss = recon_loss + kl_weight * kl_loss
+    return total_loss, recon_loss, kl_loss
+
+
+# ---------------------------------------------------------------------------
+# Quick sanity check
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    model = MotionCVAE(latent_dim=128, hidden_dim=256).to(device)
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    B = 4
+    motion_seq = torch.rand(B, T, J, 2, device=device)
+    label      = torch.randint(0, A, (B,), device=device)
+
+    # Training forward
+    seq_recon, mu, logvar = model(motion_seq, label)
+    loss, rl, kl = cvae_loss(seq_recon, motion_seq, mu, logvar, kl_weight=0.01)
+    print(f"Train loss: {loss.item():.4f}  (recon={rl.item():.4f}, kl={kl.item():.4f})")
+
+    # Inference
+    init_pose = torch.rand(P, device=device)
+    gen_seq   = model.generate(init_pose, label_idx=0, num_samples=2)
+    print(f"Generated shape: {gen_seq.shape}")  # [2, 64, 13, 2]
+    print("Sanity check passed.")

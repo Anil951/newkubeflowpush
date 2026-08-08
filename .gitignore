@@ -1,0 +1,6 @@
+iofiles/yolo11x-pose.pt
+iofiles/yolo11x.pt
+motion_generator/dataset
+motion_generator/models
+motion_generator/checkpoints
+.env
