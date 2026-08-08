@@ -185,12 +185,14 @@ class MotionDecoder(nn.Module):
             for _ in range(self.n_layers)
         ]
 
-    def forward(self, z, initial_pose_flat, action_onehot):
+    def forward(self, z, initial_pose_flat, action_onehot, target_seq=None, tf_ratio=0.0):
         """
         Args:
-            z             : [B, latent_dim]
+            z                 : [B, latent_dim]
             initial_pose_flat : [B, P]
             action_onehot     : [B, A]
+            target_seq        : [B, T, J, 2] (optional, for teacher forcing)
+            tf_ratio          : float [0, 1] (probability of using ground truth)
         Returns:
             seq : [B, T, J, 2]
         """
@@ -201,7 +203,7 @@ class MotionDecoder(nn.Module):
         prev_pose = initial_pose_flat   # [B, P]
         outputs   = []
 
-        for _ in range(self.seq_len):
+        for t in range(self.seq_len):
             # Build step input
             step_in = torch.cat([prev_pose, z, action_onehot], dim=-1)  # [B, step_input_dim]
             h_in    = self.input_embed(step_in)                           # [B, hidden]
@@ -211,12 +213,18 @@ class MotionDecoder(nn.Module):
             for i in range(1, self.n_layers):
                 h_new = hidden[i] = self.gru_cells[i](h_new, hidden[i])
 
-            # Output pose
-            pose_flat = self.output_head(h_new)      # [B, P]
-            pose_flat = torch.sigmoid(pose_flat)     # constrain to [0, 1]
+            # Output pose (Residual offset)
+            pose_delta = self.output_head(h_new)      # [B, P]
+            pose_flat  = prev_pose + pose_delta       # auto-regressive addition
 
             outputs.append(pose_flat.unsqueeze(1))   # [B, 1, P]
-            prev_pose = pose_flat                    # auto-regressive
+            
+            # Teacher forcing
+            if target_seq is not None and torch.rand(1).item() < tf_ratio:
+                # Use ground-truth for the next step's input
+                prev_pose = target_seq[:, t, :, :].reshape(B, -1)
+            else:
+                prev_pose = pose_flat
 
         seq_flat = torch.cat(outputs, dim=1)                  # [B, T, P]
         seq      = seq_flat.view(B, self.seq_len, J, 2)       # [B, T, J, 2]
@@ -276,13 +284,14 @@ class MotionCVAE(nn.Module):
         return onehot
 
     # ------------------------------------------------------------------
-    def forward(self, motion_seq, label):
+    def forward(self, motion_seq, label, tf_ratio=0.5):
         """
         Training forward pass.
 
         Args:
             motion_seq : [B, T, J, 2]  – ground-truth sequence
             label      : [B]            – integer class index
+            tf_ratio   : float          – teacher forcing ratio
 
         Returns:
             seq_recon  : [B, T, J, 2]  – reconstructed sequence
@@ -303,7 +312,7 @@ class MotionCVAE(nn.Module):
         z = PoseEncoder.reparameterise(mu, logvar)                  # [B, latent_dim]
 
         # Decode
-        seq_recon = self.decoder(z, initial_pose_flat, action_onehot)  # [B, T, J, 2]
+        seq_recon = self.decoder(z, initial_pose_flat, action_onehot, target_seq=motion_seq, tf_ratio=tf_ratio)
 
         return seq_recon, mu, logvar
 

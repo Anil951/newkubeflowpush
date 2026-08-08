@@ -87,7 +87,7 @@ def validate(model, loader, device, kl_w):
     for motion, label in loader:
         motion = motion.to(device, non_blocking=True)
         label  = label.to(device,  non_blocking=True)
-        seq_r, mu, logvar = model(motion, label)
+        seq_r, mu, logvar = model(motion, label, tf_ratio=0.0)
         tl, rl, kl = cvae_loss(seq_r, motion, mu, logvar, kl_weight=kl_w)
         total_l += tl.item()
         recon_l += rl.item()
@@ -168,7 +168,7 @@ def train(cfg=None):
             label  = label.to(device,  non_blocking=True)
 
             optimizer.zero_grad()
-            seq_recon, mu, logvar = model(motion, label)
+            seq_recon, mu, logvar = model(motion, label, tf_ratio=0.5)
             loss, rl, kl = cvae_loss(seq_recon, motion, mu, logvar, kl_weight=kl_w)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
