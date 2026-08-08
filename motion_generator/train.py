@@ -43,7 +43,7 @@ CONFIG = {
 
     # Training
     "epochs"         : 500,
-    "batch_size"     : 32,
+    "batch_size"     : 128,
     "lr"             : 1e-3,
     "weight_decay"   : 1e-5,
     "val_split"      : 0.15,
