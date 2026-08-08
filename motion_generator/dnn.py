@@ -356,28 +356,34 @@ class MotionCVAE(nn.Module):
 # Loss functions
 # ---------------------------------------------------------------------------
 
-def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0):
+def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0, vel_weight=1.0):
     """
-    CVAE loss = reconstruction (MSE) + KL divergence.
+    CVAE loss = MPJPE + Velocity Loss + KL divergence.
 
     Args:
         seq_recon  : [B, T, J, 2]  model output
         seq_gt     : [B, T, J, 2]  ground truth
         mu         : [B, latent_dim]
         logvar     : [B, latent_dim]
-        kl_weight  : scalar weight on KL term (warm-up during training)
+        kl_weight  : scalar weight on KL term
+        vel_weight : scalar weight on velocity (temporal smoothness) term
 
     Returns:
-        total_loss, recon_loss, kl_loss  (all scalar tensors)
+        total_loss, mpjpe_loss, kl_loss  (all scalar tensors)
     """
-    # Reconstruction loss (mean over all elements)
-    recon_loss = F.mse_loss(seq_recon, seq_gt, reduction="mean")
+    # 1. MPJPE Reconstruction loss (Mean Per Joint Position Error)
+    mpjpe_loss = torch.mean(torch.norm(seq_recon - seq_gt, dim=-1))
 
-    # KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    # 2. Velocity loss (Temporal smoothness)
+    vel_recon = seq_recon[:, 1:, :, :] - seq_recon[:, :-1, :, :]
+    vel_gt    = seq_gt[:, 1:, :, :] - seq_gt[:, :-1, :, :]
+    vel_loss  = torch.mean(torch.norm(vel_recon - vel_gt, dim=-1))
+
+    # 3. KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
-    total_loss = recon_loss + kl_weight * kl_loss
-    return total_loss, recon_loss, kl_loss
+    total_loss = mpjpe_loss + vel_weight * vel_loss + kl_weight * kl_loss
+    return total_loss, mpjpe_loss, kl_loss
 
 
 # ---------------------------------------------------------------------------

@@ -147,7 +147,7 @@ def draw_skeleton_frame(canvas, keypoints_xy, frame_w, frame_h,
     px_pts = []
     for (x, y) in keypoints_xy:
         px = int(x * (frame_w - 80) + 40)
-        py = int((1.0 - y) * (frame_h - 80) + 40)   # flip Y so head is up
+        py = int(y * (frame_h - 80) + 40)
         px_pts.append((px, py))
 
     # Draw bones
@@ -214,6 +214,51 @@ def visualize_skeleton_sequence(
 
 
 # ---------------------------------------------------------------------------
+# Skeletal Retargeting (Forward Kinematics)
+# ---------------------------------------------------------------------------
+
+def enforce_bone_lengths(motion_arr, initial_pose_flat):
+    """
+    Post-processing to strictly enforce initial bone lengths.
+    motion_arr: [num_samples, T, 13, 2]
+    initial_pose_flat: [26] tensor
+    """
+    import numpy as np
+    S, T, J, _ = motion_arr.shape
+    if hasattr(initial_pose_flat, "cpu"):
+        init_pose = initial_pose_flat.cpu().numpy().reshape(13, 2)
+    else:
+        init_pose = np.array(initial_pose_flat).reshape(13, 2)
+        
+    tree = [
+        (0, 1), (0, 2),          
+        (1, 3), (3, 5),          
+        (2, 4), (4, 6),          
+        (1, 7), (7, 9), (9, 11), 
+        (2, 8), (8, 10), (10, 12) 
+    ]
+    
+    gt_lengths = {}
+    for p, c in tree:
+        gt_lengths[(p, c)] = np.linalg.norm(init_pose[c] - init_pose[p])
+        
+    fixed_arr = np.zeros_like(motion_arr)
+    for s in range(S):
+        for t in range(T):
+            fixed_arr[s, t, 0] = motion_arr[s, t, 0] # Root follows prediction
+            for p, c in tree:
+                direction = motion_arr[s, t, c] - motion_arr[s, t, p]
+                norm = np.linalg.norm(direction)
+                if norm > 1e-5:
+                    direction = direction / norm
+                else:
+                    direction = np.array([0.0, 1.0])
+                fixed_arr[s, t, c] = fixed_arr[s, t, p] + direction * gt_lengths[(p, c)]
+                
+    return fixed_arr
+
+
+# ---------------------------------------------------------------------------
 # Main generation function
 # ---------------------------------------------------------------------------
 
@@ -277,6 +322,7 @@ def generate_motion(
         )  # [num_samples, T, 13, 2]
 
     motion_arr = gen_tensor.cpu().numpy()   # [num_samples, T, 13, 2]
+    motion_arr = enforce_bone_lengths(motion_arr, initial_pose)
     print(f"Generated shape: {motion_arr.shape}")
 
     # 4. Save numpy array
