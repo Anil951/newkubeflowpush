@@ -365,17 +365,46 @@ class MotionCVAE(nn.Module):
 # Loss functions
 # ---------------------------------------------------------------------------
 
-def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0, vel_weight=1.0):
+# Bone connections for bone-length consistency (matching skeleton topology)
+BONE_PAIRS = [
+    (0, 1), (0, 2),           # Face to shoulders
+    (1, 3), (3, 5),           # Left arm
+    (2, 4), (4, 6),           # Right arm
+    (1, 7), (2, 8),           # Torso sides
+    (7, 8),                    # Hip line
+    (7, 9), (9, 11),          # Left leg
+    (8, 10), (10, 12),        # Right leg
+]
+
+
+def compute_bone_lengths(seq):
+    """Compute bone lengths for each frame.
+    
+    Args:
+        seq: [B, T, J, 2]
+    Returns:
+        [B, T, num_bones] - length of each bone per frame
     """
-    CVAE loss = MPJPE + Velocity Loss + KL divergence.
+    lengths = []
+    for (i, j) in BONE_PAIRS:
+        bone_vec = seq[:, :, i, :] - seq[:, :, j, :]        # [B, T, 2]
+        bone_len = torch.norm(bone_vec, dim=-1)               # [B, T]
+        lengths.append(bone_len)
+    return torch.stack(lengths, dim=-1)                        # [B, T, num_bones]
+
+
+def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0, vel_weight=1.0, bone_weight=0.5):
+    """
+    CVAE loss = MPJPE + Velocity Loss + Bone Consistency Loss + KL divergence.
 
     Args:
-        seq_recon  : [B, T, J, 2]  model output
-        seq_gt     : [B, T, J, 2]  ground truth
-        mu         : [B, latent_dim]
-        logvar     : [B, latent_dim]
-        kl_weight  : scalar weight on KL term
-        vel_weight : scalar weight on velocity (temporal smoothness) term
+        seq_recon   : [B, T, J, 2]  model output
+        seq_gt      : [B, T, J, 2]  ground truth
+        mu          : [B, latent_dim]
+        logvar      : [B, latent_dim]
+        kl_weight   : scalar weight on KL term
+        vel_weight  : scalar weight on velocity (temporal smoothness) term
+        bone_weight : scalar weight on bone-length consistency term
 
     Returns:
         total_loss, mpjpe_loss, kl_loss  (all scalar tensors)
@@ -388,10 +417,16 @@ def cvae_loss(seq_recon, seq_gt, mu, logvar, kl_weight=1.0, vel_weight=1.0):
     vel_gt    = seq_gt[:, 1:, :, :] - seq_gt[:, :-1, :, :]
     vel_loss  = torch.mean(torch.norm(vel_recon - vel_gt, dim=-1))
 
-    # 3. KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    # 3. Bone-length consistency loss
+    # Penalizes bone lengths in reconstruction that differ from ground truth
+    bones_recon = compute_bone_lengths(seq_recon)  # [B, T, num_bones]
+    bones_gt    = compute_bone_lengths(seq_gt)      # [B, T, num_bones]
+    bone_loss   = torch.mean((bones_recon - bones_gt) ** 2)
+
+    # 4. KL divergence: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
-    total_loss = mpjpe_loss + vel_weight * vel_loss + kl_weight * kl_loss
+    total_loss = mpjpe_loss + vel_weight * vel_loss + bone_weight * bone_loss + kl_weight * kl_loss
     return total_loss, mpjpe_loss, kl_loss
 
 

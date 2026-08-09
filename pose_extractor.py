@@ -33,7 +33,7 @@ settings.update({
 det_model = YOLO('yolo11x.pt')
 pose_model = YOLO('yolo11x-pose.pt')
 device = 'cpu'
-image_path = './iofiles/image.jpeg'
+image_path = './iofiles/f99a3cd6-93c4-43aa-a155-e76b03578dd8.jpg'
 save_img_path = f'./iofiles/cropped_{image_path.split("/")[2]}'
 save_kpts_path = './iofiles/normalized_keypoints.json'
 
@@ -119,7 +119,17 @@ def consolidate_and_shift_keypoints(kpts, confs, bbox):
     return new_kpts
 
 def normalize_keypoints(kpts, crop_w, crop_h):
-    """Normalizes keypoints using Torso length, centering at the hip."""
+    """Normalizes keypoints using Torso length, centering at the hip.
+    
+    Convention: positive Y = up (head), negative Y = down (feet).
+    This matches the training data from datapreprocess.py which flips the
+    3D Y-axis via y = -Y_3d so the skeleton stands upright.
+    
+    In image/pixel space, Y increases downward (top=0, bottom=H).
+    After centering at the hip, the head has negative Y (above hip)
+    and feet have positive Y (below hip). We negate Y to flip this
+    so the convention matches the training data.
+    """
     pts = np.array(kpts, dtype=np.float32)
     
     # Calculate hip midpoint (indices 7 and 8)
@@ -140,6 +150,9 @@ def normalize_keypoints(kpts, crop_w, crop_h):
         torso_length = 1.0
         
     pts = pts / torso_length
+    
+    # Flip Y-axis: image Y goes downward, but training data uses Y-up convention
+    pts[:, 1] = -pts[:, 1]
     
     normalized = []
     for pt in pts:

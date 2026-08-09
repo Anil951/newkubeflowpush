@@ -53,6 +53,10 @@ CONFIG = {
     "kl_max"          : 0.01,
     "kl_warmup_epochs": 100,
 
+    # Teacher forcing: decays from tf_start -> 0 over tf_decay_epochs
+    "tf_start"        : 0.6,
+    "tf_decay_epochs" : 300,
+
     # Paths
     "npz_path"         : NPZ_PATH,
     "checkpoint_dir"   : os.path.join(
@@ -76,6 +80,13 @@ def kl_weight(epoch, kl_max, warmup_epochs):
     if warmup_epochs <= 0:
         return kl_max
     return min(kl_max, kl_max * epoch / warmup_epochs)
+
+
+def tf_ratio_schedule(epoch, tf_start, decay_epochs):
+    """Linear teacher forcing decay: tf_start -> 0 over decay_epochs."""
+    if decay_epochs <= 0:
+        return 0.0
+    return max(0.0, tf_start * (1.0 - epoch / decay_epochs))
 
 
 @torch.no_grad()
@@ -155,8 +166,9 @@ def train(cfg=None):
     t0 = time.time()
 
     for epoch in range(1, cfg["epochs"] + 1):
-        # KL weight for this epoch
+        # KL weight and teacher forcing ratio for this epoch
         kl_w = kl_weight(epoch, cfg["kl_max"], cfg["kl_warmup_epochs"])
+        tf_r = tf_ratio_schedule(epoch, cfg["tf_start"], cfg["tf_decay_epochs"])
 
         # ---- Train ----
         model.train()
@@ -168,7 +180,7 @@ def train(cfg=None):
             label  = label.to(device,  non_blocking=True)
 
             optimizer.zero_grad()
-            seq_recon, mu, logvar = model(motion, label, tf_ratio=0.5)
+            seq_recon, mu, logvar = model(motion, label, tf_ratio=tf_r)
             loss, rl, kl = cvae_loss(seq_recon, motion, mu, logvar, kl_weight=kl_w)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -201,7 +213,7 @@ def train(cfg=None):
             print(
                 f"Epoch {epoch:4d}/{cfg['epochs']} | "
                 f"T={elapsed:7.1f}s | "
-                f"KL_w={kl_w:.4f} | "
+                f"KL_w={kl_w:.4f} | TF={tf_r:.3f} | "
                 f"Train [tot={train_total:.4f} rec={train_recon:.4f} kl={train_kl:.4f}] | "
                 f"Val   [tot={val_total:.4f} rec={val_recon:.4f} kl={val_kl:.4f}]"
             )

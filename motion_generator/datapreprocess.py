@@ -128,12 +128,30 @@ def normalise_clip(pose_2d):
 
 
 def pad_or_trim(pose_2d, target_len=SEQ_LEN):
-    """Trim or pad (repeat last frame) to exactly target_len frames."""
+    """Trim or temporally stretch to exactly target_len frames.
+    
+    Instead of repeating the last frame (which creates frozen segments that
+    teach the model to 'hover'), we use linear interpolation to smoothly
+    stretch short clips to the target length. This preserves motion dynamics.
+    """
     T = pose_2d.shape[0]
     if T >= target_len:
         return pose_2d[:target_len]
-    pad = np.repeat(pose_2d[-1:], target_len - T, axis=0)
-    return np.concatenate([pose_2d, pad], axis=0)
+    
+    # Temporal interpolation: stretch the clip to target_len
+    # Create new time indices evenly spaced across the original clip
+    old_indices = np.arange(T)
+    new_indices = np.linspace(0, T - 1, target_len)
+    
+    # Interpolate each joint coordinate independently
+    # pose_2d shape: [T, 13, 2]
+    J, D = pose_2d.shape[1], pose_2d.shape[2]
+    result = np.zeros((target_len, J, D), dtype=np.float32)
+    for j in range(J):
+        for d in range(D):
+            result[:, j, d] = np.interp(new_indices, old_indices, pose_2d[:, j, d])
+    
+    return result
 
 
 def get_action_code(filename):
