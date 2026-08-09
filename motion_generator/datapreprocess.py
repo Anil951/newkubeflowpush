@@ -19,12 +19,12 @@ Joint mapping: HumanAct12 (24 joints) -> project 13 keypoints
   Proj idx | Name        | HumanAct12 source joint(s)
   ---------|-------------|----------------------------
   0        | Face        | avg(12, 15)  <- neck(12), head(15)
-  1        | L_Shoulder  | 13
-  2        | R_Shoulder  | 14
-  3        | L_Elbow     | 16
-  4        | R_Elbow     | 17
-  5        | L_Wrist     | 18
-  6        | R_Wrist     | 19
+  1        | L_Shoulder  | 16
+  2        | R_Shoulder  | 17
+  3        | L_Elbow     | 18
+  4        | R_Elbow     | 19
+  5        | L_Wrist     | 20
+  6        | R_Wrist     | 21
   7        | L_Hip       | 1
   8        | R_Hip       | 2
   9        | L_Knee      | 4
@@ -50,9 +50,8 @@ TARGET_ACTIONS = {
     "0201": 0,   # walk
     "0301": 1,   # run
     "0402": 2,   # jump_vertical
-    "1201": 3,   # throw_right_hand
 }
-ACTION_NAMES = ["walk", "run", "jump_vertical", "throw_right_hand"]
+ACTION_NAMES = ["walk", "run", "jump_vertical"]
 NUM_ACTIONS  = len(ACTION_NAMES)
 SEQ_LEN      = 64   # fixed output sequence length
 NUM_JOINTS   = 13
@@ -74,12 +73,12 @@ def map_joints_24_to_13(pose_3d):
     T = pose_3d.shape[0]
     out = np.zeros((T, 13, 3), dtype=np.float32)
     out[:, 0,  :] = (pose_3d[:, 12, :] + pose_3d[:, 15, :]) / 2.0  # Face
-    out[:, 1,  :] = pose_3d[:, 13, :]   # L_Shoulder
-    out[:, 2,  :] = pose_3d[:, 14, :]   # R_Shoulder
-    out[:, 3,  :] = pose_3d[:, 16, :]   # L_Elbow
-    out[:, 4,  :] = pose_3d[:, 17, :]   # R_Elbow
-    out[:, 5,  :] = pose_3d[:, 18, :]   # L_Wrist
-    out[:, 6,  :] = pose_3d[:, 19, :]   # R_Wrist
+    out[:, 1,  :] = pose_3d[:, 16, :]  # L_Shoulder
+    out[:, 2,  :] = pose_3d[:, 17, :]  # R_Shoulder
+    out[:, 3,  :] = pose_3d[:, 18, :]  # L_Elbow
+    out[:, 4,  :] = pose_3d[:, 19, :]  # R_Elbow
+    out[:, 5,  :] = pose_3d[:, 20, :]  # L_Wrist
+    out[:, 6,  :] = pose_3d[:, 21, :]  # R_Wrist
     out[:, 7,  :] = pose_3d[:, 1,  :]   # L_Hip
     out[:, 8,  :] = pose_3d[:, 2,  :]   # R_Hip
     out[:, 9,  :] = pose_3d[:, 4,  :]   # L_Knee

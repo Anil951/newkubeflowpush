@@ -5,3 +5,4 @@ motion_generator/models
 motion_generator/checkpoints
 iofiles/motion_cvae_best.pt
 .env
+*/__pycache__

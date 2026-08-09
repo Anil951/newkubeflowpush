@@ -59,9 +59,9 @@ class HumanAct12Dataset(Dataset):
         motion = self.motions[idx].copy()   # [64, 13, 2]
         label  = int(self.labels[idx])
 
-        # Random horizontal flip augmentation (flip x -> 1 - x)
+        # Random horizontal flip augmentation (flip x -> -x because centered at 0,0)
         if self.augment and np.random.rand() < 0.5:
-            motion[:, :, 0] = 1.0 - motion[:, :, 0]
+            motion[:, :, 0] = -motion[:, :, 0]
 
         motion_t = torch.tensor(motion, dtype=torch.float32)  # [64, 13, 2]
         label_t  = torch.tensor(label,  dtype=torch.long)

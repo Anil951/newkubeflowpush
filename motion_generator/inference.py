@@ -5,7 +5,7 @@ Inference pipeline for the Action-Conditioned Motion CVAE-GRU.
 
 Given:
   - A starting keypoint pose  (from pose_extractor.py / normalized_keypoints.json)
-  - An action label           (0=walk, 1=run, 2=jump_vertical, 3=throw_right_hand)
+  - An action label           (0=walk, 1=run, 2=jump_vertical)
 
 Outputs:
   - iofiles/generated_motion.npy       – [T, 13, 2] float32 array (normalised)
@@ -15,13 +15,12 @@ Usage:
     python -m motion_generator.inference                 # default: walk
     python -m motion_generator.inference --action run
     python -m motion_generator.inference --action jump_vertical --model iofiles/motion_cvae_best.pt
-    python -m motion_generator.inference --action throw_right_hand --num_samples 3
+    python -m motion_generator.inference --action jump_vertical --num_samples 3
 
 Action label map:
     0 = walk           (A0201)
     1 = run            (A0301)
     2 = jump_vertical  (A0402)
-    3 = throw_right_hand (A1201)
 """
 
 import os
@@ -232,12 +231,17 @@ def enforce_bone_lengths(motion_arr, initial_pose_flat):
     else:
         init_pose = np.array(initial_pose_flat).reshape(13, 2)
         
+    # Hip-rooted tree to prevent lower-body pendulum effect
+    # Root is L_Hip (7)
     tree = [
-        (0, 1), (0, 2),          
-        (1, 3), (3, 5),          
-        (2, 4), (4, 6),          
-        (1, 7), (7, 9), (9, 11), 
-        (2, 8), (8, 10), (10, 12) 
+        (7, 9), (9, 11),         # Left Leg
+        (7, 8),                  # Hip connection
+        (8, 10), (10, 12),       # Right Leg
+        (7, 1),                  # Left Torso (L_Hip to L_Shoulder)
+        (1, 2),                  # Shoulder connection
+        (1, 0),                  # Neck/Face (L_Shoulder to Face)
+        (1, 3), (3, 5),          # Left Arm
+        (2, 4), (4, 6)           # Right Arm
     ]
     
     gt_lengths = {}
@@ -247,7 +251,7 @@ def enforce_bone_lengths(motion_arr, initial_pose_flat):
     fixed_arr = np.zeros_like(motion_arr)
     for s in range(S):
         for t in range(T):
-            fixed_arr[s, t, 0] = motion_arr[s, t, 0] # Root follows prediction
+            fixed_arr[s, t, 7] = motion_arr[s, t, 7] # Root (Hip) follows prediction
             for p, c in tree:
                 direction = motion_arr[s, t, c] - motion_arr[s, t, p]
                 norm = np.linalg.norm(direction)
