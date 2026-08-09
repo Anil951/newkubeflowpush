@@ -86,7 +86,7 @@ class HumanAct12Dataset(Dataset):
 
 def get_dataloaders(
     npz_path      = DEFAULT_NPZ_PATH,
-    batch_size    = 128,
+    batch_size    = 32,
     val_split     = 0.15,
     num_workers   = 0,
     seed          = 42,
